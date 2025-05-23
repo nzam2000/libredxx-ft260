@@ -45,17 +45,26 @@ struct libredxx_opened_device {
 	bool read_interrupted;
 };
 
+struct libredxx_guid_id {
+	libredxx_device_type type;
+	GUID guid;
+};
+
 libredxx_status libredxx_enumerate_interfaces(HDEVINFO dev_info, const libredxx_find_filter* filters, size_t filters_count, libredxx_found_device*** devices, size_t* devices_count)
 {
-	GUID guids[] = {
-		{0x219D0508, 0x57A8, 0x4FF5, {0x97, 0xA1, 0xBD, 0x86, 0x58, 0x7C, 0x6C, 0x7E}}, // D2XX
-		{0xD1E8FE6A, 0xAB75, 0x4D9E, {0x97, 0xD2, 0x06, 0xFA, 0x22, 0xC7, 0x73, 0x6C}}, // D3XX
+	GUID hid_guid;
+	HidD_GetHidGuid(&hid_guid);
+	libredxx_guid_id guids_table[] = {
+		{LIBREDXX_DEVICE_TYPE_D2XX, {0x219D0508, 0x57A8, 0x4FF5, {0x97, 0xA1, 0xBD, 0x86, 0x58, 0x7C, 0x6C, 0x7E}}},
+		{LIBREDXX_DEVICE_TYPE_D3XX, {0xD1E8FE6A, 0xAB75, 0x4D9E, {0x97, 0xD2, 0x06, 0xFA, 0x22, 0xC7, 0x73, 0x6C}}},
+		{LIBREDXX_DEVICE_TYPE_FT260, hid_guid}
 	};
 	size_t device_index = 0;
-	size_t guids_count = sizeof(guids) / sizeof(guids[0]);
+	size_t guids_count = sizeof(guids_table) / sizeof(guids_table[0]);
 	libredxx_found_device* private_devices = NULL;
 	for (size_t guid_index = 0; guid_index < guids_count; ++guid_index) {
-		GUID* guid = &guids[guid_index];
+		libredxx_guid_id* guid_entry = &guids_table[guid_index];
+		GUID* guid = &guid_entry->guid;
 		DWORD member_index = 0;
 		while (1) {
 			SP_DEVICE_INTERFACE_DATA ifd;
@@ -89,14 +98,14 @@ libredxx_status libredxx_enumerate_interfaces(HDEVINFO dev_info, const libredxx_
 			uint16_t pid = (uint16_t)wcstol(pid_str, NULL, 16);
 			for (size_t filter_index = 0; filter_index < filters_count; ++filter_index) {
 				const libredxx_find_filter* filter = &filters[filter_index];
-				if (filter->id.vid == vid && filter->id.pid == pid) {
+				if (filter->id.vid == vid && filter->id.pid == pid && filter->type == guid_entry->type) {
 					private_devices = realloc(private_devices, sizeof(libredxx_found_device) * (device_index + 1));
 					libredxx_found_device* device = &private_devices[device_index];
 					device->id.vid = vid;
 					device->id.pid = pid;
 					++device_index;
 					wcscpy_s(device->path, sizeof(device->path) / sizeof(device->path[0]), detail->DevicePath);
-					device->type = filter->type;
+					device->type = guid_entry->type;
 					break;
 				}
 			}
@@ -170,7 +179,9 @@ static libredxx_status libredxx_d3xx_set_timeout(libredxx_opened_device* device,
 
 libredxx_status libredxx_open_device(const libredxx_found_device* found, libredxx_opened_device** opened)
 {
-	DWORD create_flags = found->type == LIBREDXX_DEVICE_TYPE_D2XX ? 0 : FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL;
+	DWORD create_flags = found->type == LIBREDXX_DEVICE_TYPE_D2XX || found->type == LIBREDXX_DEVICE_TYPE_FT260
+		                     ? 0
+		                     : FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL;
 	HANDLE handle = CreateFileW(found->path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, create_flags, NULL);
 	if (handle == INVALID_HANDLE_VALUE) {
 		return LIBREDXX_STATUS_ERROR_SYS;
@@ -196,6 +207,12 @@ libredxx_status libredxx_open_device(const libredxx_found_device* found, libredx
 		if (status != LIBREDXX_STATUS_SUCCESS) {
 			free(private_opened);
 			return status;
+		}
+	} else if (found->type == LIBREDXX_DEVICE_TYPE_FT260) {
+		// use 64 reports for input buffer
+		if (!HidD_SetNumInputBuffers(private_opened->handle, 64)) {
+			free(private_opened);
+			return LIBREDXX_STATUS_ERROR_SYS;
 		}
 	}
 	*opened = private_opened;
