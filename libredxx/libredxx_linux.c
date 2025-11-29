@@ -205,35 +205,29 @@ libredxx_status libredxx_get_device_type(const libredxx_found_device* found, lib
 
 libredxx_status libredxx_open_device(const libredxx_found_device* found, libredxx_opened_device** opened)
 {
-	int handle = open(found->path, O_RDWR);
-	if (handle == -1) {
-		return LIBREDXX_STATUS_ERROR_SYS;
-	}
-	bool claimed = false;
-	if (found->type == LIBREDXX_DEVICE_TYPE_FT260) {
-		// detach kernel HID driver if attached
-		struct usbdevfs_getdriver gd = {0};
-		gd.interface = LIBREDXX_FT260_INTERFACE;
-		if (ioctl(handle, USBDEVFS_GETDRIVER, &gd) == 0) {
-			struct usbdevfs_disconnect_claim dc = {0};
-			dc.interface = LIBREDXX_FT260_INTERFACE;
-			strncpy(dc.driver, "libredxx", sizeof(dc.driver) - 1);
-			if (ioctl(handle, USBDEVFS_DISCONNECT_CLAIM, &dc) == -1) {
-				close(handle);
-				return LIBREDXX_STATUS_ERROR_SYS; // per requirement: fail if detach fails
-			}
-			claimed = true;
-		}
-	}
-	if (!claimed) {
-		for (unsigned int i = 0; i < found->interface_count; ++i) {
-			if (ioctl(handle, USBDEVFS_CLAIMINTERFACE, &i) == -1) {
-				close(handle);
-				return LIBREDXX_STATUS_ERROR_SYS;
-			}
-		}
-		claimed = true;
-	}
+    int handle = open(found->path, O_RDWR);
+    if (handle == -1) {
+        return LIBREDXX_STATUS_ERROR_SYS;
+    }
+    // if a kernel driver is bound to an interface, disconnect it and claim; otherwise just claim
+    for (unsigned int i = 0; i < found->interface_count; ++i) {
+        struct usbdevfs_getdriver gd = {0};
+        gd.interface = i;
+        if (ioctl(handle, USBDEVFS_GETDRIVER, &gd) == 0) {
+            struct usbdevfs_disconnect_claim dc = {0};
+            dc.interface = i;
+            strncpy(dc.driver, "libredxx", sizeof(dc.driver) - 1);
+            if (ioctl(handle, USBDEVFS_DISCONNECT_CLAIM, &dc) == -1) {
+                close(handle);
+                return LIBREDXX_STATUS_ERROR_SYS;
+            }
+        } else {
+            if (ioctl(handle, USBDEVFS_CLAIMINTERFACE, &i) == -1) {
+                close(handle);
+                return LIBREDXX_STATUS_ERROR_SYS;
+            }
+        }
+    }
 	libredxx_opened_device* private_opened = calloc(1, sizeof(libredxx_opened_device));
 	if (!private_opened) {
 		close(handle);
@@ -268,10 +262,9 @@ libredxx_status libredxx_close_device(libredxx_opened_device* device)
 	for (unsigned int i = 0; i < device->found.interface_count; ++i) {
 		ioctl(device->handle, USBDEVFS_RELEASEINTERFACE, &i);
 	}
-	if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
-		// if kernel driver detached when opening device, reattach
-		unsigned int if0 = LIBREDXX_FT260_INTERFACE;
-		ioctl(device->handle, USBDEVFS_CONNECT, &if0);
+	// reattach kernel drivers if any were detached
+	for (unsigned int i = 0; i < device->found.interface_count; ++i) {
+		ioctl(device->handle, USBDEVFS_CONNECT, &i);
 	}
 	close(device->handle);
 	free(device);
@@ -286,6 +279,8 @@ libredxx_status libredxx_interrupt(libredxx_opened_device* device)
 		if (write(device->d3xx_pipes[1], &one, sizeof(one)) != sizeof(one)) {
 			return LIBREDXX_STATUS_ERROR_SYS;
 		}
+	} else if (device->found.type != LIBREDXX_DEVICE_TYPE_D2XX && device->found.type != LIBREDXX_DEVICE_TYPE_FT260) {
+		return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 	}
 	return LIBREDXX_STATUS_SUCCESS;
 }
@@ -305,63 +300,71 @@ libredxx_status libredxx_read(libredxx_opened_device* device, void* buffer, size
 {
 	uint8_t* bBuffer = (uint8_t*)buffer;
 	libredxx_status status;
-    if (device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
-		status = libredxx_d3xx_trigger_read(device, *buffer_size);
-		if (status != LIBREDXX_STATUS_SUCCESS) {
-			return status;
-		}
+	if (device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			status = libredxx_d3xx_trigger_read(device, *buffer_size);
+			if (status != LIBREDXX_STATUS_SUCCESS) {
+				return status;
+			}
 
-		struct usbdevfs_urb urb = {0};
-		urb.type = USBDEVFS_URB_TYPE_BULK;
-		urb.endpoint = 0x82;
-		urb.buffer = buffer;
-		urb.buffer_length = *buffer_size;
+			struct usbdevfs_urb urb = {0};
+			urb.type = USBDEVFS_URB_TYPE_BULK;
+			urb.endpoint = 0x82;
+			urb.buffer = buffer;
+			urb.buffer_length = *buffer_size;
 
-		if (ioctl(device->handle, USBDEVFS_SUBMITURB, &urb) != 0) {
-			return LIBREDXX_STATUS_ERROR_SYS;
-		}
-		struct pollfd fds[2] = {0};
-		fds[0].fd = device->handle;
-		fds[0].events = POLLOUT;
-		// for int
-		fds[1].fd = device->d3xx_pipes[0];
-		fds[1].events = POLLIN;
-		if (poll(fds, 2, -1) < 0) {
-			return LIBREDXX_STATUS_ERROR_SYS;
-		}
+			if (ioctl(device->handle, USBDEVFS_SUBMITURB, &urb) != 0) {
+				return LIBREDXX_STATUS_ERROR_SYS;
+			}
+			struct pollfd fds[2] = {0};
+			fds[0].fd = device->handle;
+			fds[0].events = POLLOUT;
+			// for int
+			fds[1].fd = device->d3xx_pipes[0];
+			fds[1].events = POLLIN;
+			if (poll(fds, 2, -1) < 0) {
+				return LIBREDXX_STATUS_ERROR_SYS;
+			}
 
-		if (device->read_interrupted) {
-			return LIBREDXX_STATUS_ERROR_INTERRUPTED;
-		}
+			if (device->read_interrupted) {
+				return LIBREDXX_STATUS_ERROR_INTERRUPTED;
+			}
 
-		if (ioctl(device->handle, USBDEVFS_REAPURB, &urb) != 0) {
-			return LIBREDXX_STATUS_ERROR_SYS;
-		}
+			if (ioctl(device->handle, USBDEVFS_REAPURB, &urb) != 0) {
+				return LIBREDXX_STATUS_ERROR_SYS;
+			}
 
-        *buffer_size = urb.actual_length;
-        return LIBREDXX_STATUS_SUCCESS;
+			*buffer_size = urb.actual_length;
+			return LIBREDXX_STATUS_SUCCESS;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
+		}
     } else if (device->found.type == LIBREDXX_DEVICE_TYPE_D2XX) {
-        struct usbdevfs_bulktransfer bulk = {0};
-        bulk.ep = 0x81;
-        bulk.len = device->d2xx_rx_buffer_size;
-        bulk.data = device->d2xx_rx_buffer;
-        device->read_interrupted = false;
-        while (true) {
-            int r = ioctl(device->handle, USBDEVFS_BULK, &bulk);
-            if (r == -1) {
-                return LIBREDXX_STATUS_ERROR_SYS;
-            }
-            if (r > D2XX_HEADER_SIZE) {
-                *buffer_size = r - D2XX_HEADER_SIZE;
-                memcpy(buffer, &device->d2xx_rx_buffer[2], *buffer_size);
-                return LIBREDXX_STATUS_SUCCESS;
-            }
-            if (device->read_interrupted) {
-                return LIBREDXX_STATUS_ERROR_INTERRUPTED;
-            }
-        }
+    	if (endpoint == LIBREDXX_ENDPOINT_IO) {
+    		struct usbdevfs_bulktransfer bulk = {0};
+    		bulk.ep = 0x81;
+    		bulk.len = device->d2xx_rx_buffer_size;
+    		bulk.data = device->d2xx_rx_buffer;
+    		device->read_interrupted = false;
+    		while (true) {
+    			int r = ioctl(device->handle, USBDEVFS_BULK, &bulk);
+    			if (r == -1) {
+    				return LIBREDXX_STATUS_ERROR_SYS;
+    			}
+    			if (r > D2XX_HEADER_SIZE) {
+    				*buffer_size = r - D2XX_HEADER_SIZE;
+    				memcpy(buffer, &device->d2xx_rx_buffer[2], *buffer_size);
+    				return LIBREDXX_STATUS_SUCCESS;
+    			}
+    			if (device->read_interrupted) {
+    				return LIBREDXX_STATUS_ERROR_INTERRUPTED;
+    			}
+    		}
+    	} else {
+    		return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
+    	}
     } else if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
-        if (endpoint == LIBREDXX_ENDPOINT_FEATURE) {
+        if (endpoint == LIBREDXX_ENDPOINT_CONTROL) {
 			const uint8_t report_id = bBuffer[0];
         	if (!report_id || *buffer_size != LIBREDXX_FT260_REPORT_SIZE) {
         		return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
@@ -410,20 +413,22 @@ libredxx_status libredxx_read(libredxx_opened_device* device, void* buffer, size
 libredxx_status libredxx_write(libredxx_opened_device* device, void* buffer, size_t* buffer_size, libredxx_endpoint endpoint) {
 	uint8_t* bBuffer = (uint8_t*)buffer;
 	if (device->found.type == LIBREDXX_DEVICE_TYPE_D2XX || device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
-		struct usbdevfs_bulktransfer bulk = {0};
-		bulk.ep = 0x02;
-		bulk.len = *buffer_size;
-		bulk.data = buffer;
-		if (-1 == ioctl(device->handle, USBDEVFS_BULK, &bulk)) {
-			return LIBREDXX_STATUS_ERROR_SYS;
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			struct usbdevfs_bulktransfer bulk = {0};
+			bulk.ep = 0x02;
+			bulk.len = *buffer_size;
+			bulk.data = buffer;
+			int r = ioctl(device->handle, USBDEVFS_BULK, &bulk);
+			return r == -1 ? LIBREDXX_STATUS_ERROR_SYS : LIBREDXX_STATUS_SUCCESS;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		return LIBREDXX_STATUS_SUCCESS;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
 		const uint8_t report_id = bBuffer[0];
 		if (!report_id) {
 			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		if (endpoint == LIBREDXX_ENDPOINT_FEATURE) {
+		if (endpoint == LIBREDXX_ENDPOINT_CONTROL) {
 			if (*buffer_size != LIBREDXX_FT260_REPORT_SIZE) {
 				return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 			}

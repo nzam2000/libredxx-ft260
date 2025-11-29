@@ -246,9 +246,7 @@ static libredxx_status libredxx_d3xx_set_timeout(libredxx_opened_device* device,
 
 libredxx_status libredxx_open_device(const libredxx_found_device* found, libredxx_opened_device** opened)
 {
-	DWORD create_flags = found->type == LIBREDXX_DEVICE_TYPE_D2XX
-		                     ? 0
-		                     : FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL;
+	DWORD create_flags = found->type == LIBREDXX_DEVICE_TYPE_D2XX ? 0 : FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL;
 	HANDLE handle = CreateFileW(found->path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, create_flags, NULL);
 	if (handle == INVALID_HANDLE_VALUE) {
 		return LIBREDXX_STATUS_ERROR_SYS;
@@ -323,25 +321,25 @@ static libredxx_status libredxx_d3xx_set_stream_pipe(libredxx_opened_device* dev
 libredxx_status libredxx_interrupt(libredxx_opened_device* device)
 {
 	device->read_interrupted = true;
-	libredxx_status status = LIBREDXX_STATUS_SUCCESS;
-
 	if (device->found.type == LIBREDXX_DEVICE_TYPE_D2XX) {
-		if (!SetEvent(device->d2xx_read_event)) {
-			status = LIBREDXX_STATUS_ERROR_SYS;
-		}
+		return SetEvent(device->d2xx_read_event) ? LIBREDXX_STATUS_SUCCESS : LIBREDXX_STATUS_ERROR_SYS;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
 		// abort also released the overlapped event
+		libredxx_status status;
 		status = libredxx_d3xx_abort_pipe(device, 0x82);
 		if (status != LIBREDXX_STATUS_SUCCESS) {
 			return status;
 		}
 		status = libredxx_d3xx_abort_pipe(device, 0x02);
+		return status;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
 		if (!CancelIoEx(device->handle, NULL)) {
-			status = LIBREDXX_STATUS_ERROR_SYS;
+			return LIBREDXX_STATUS_ERROR_SYS;
 		}
+		return LIBREDXX_STATUS_SUCCESS;
+	} else {
+		return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 	}
-	return status;
 }
 
 static libredxx_status libredxx_d2xx_rx_available(libredxx_opened_device* device, size_t* available)
@@ -404,47 +402,55 @@ libredxx_status libredxx_read(libredxx_opened_device* device, void* buffer, size
 {
 	BYTE* bBuffer = (BYTE*)buffer;
 	if (device->found.type == LIBREDXX_DEVICE_TYPE_D2XX) {
-		libredxx_status status;
-		size_t available;
-		status = libredxx_d2xx_wait_rx(device, &available);
-		if (status != LIBREDXX_STATUS_SUCCESS) {
-			return status;
-		}
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			libredxx_status status;
+			size_t available;
+			status = libredxx_d2xx_wait_rx(device, &available);
+			if (status != LIBREDXX_STATUS_SUCCESS) {
+				return status;
+			}
 
-		*buffer_size = min(available, *buffer_size);
-		if (!ReadFile(device->handle, buffer, (DWORD)*buffer_size, (DWORD*)buffer_size, NULL)) {
-			return LIBREDXX_STATUS_ERROR_SYS;
+			*buffer_size = min(available, *buffer_size);
+			if (!ReadFile(device->handle, buffer, (DWORD)*buffer_size, (DWORD*)buffer_size, NULL)) {
+				return LIBREDXX_STATUS_ERROR_SYS;
+			}
+			return LIBREDXX_STATUS_SUCCESS;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		return LIBREDXX_STATUS_SUCCESS;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
-		libredxx_status ret = LIBREDXX_STATUS_SUCCESS;
-		uint8_t read_pipe = 0x82;
-		if (device->d3xx_stream_pipe != *buffer_size) {
-			ret = libredxx_d3xx_set_stream_pipe(device, read_pipe, *buffer_size);
-			if (ret != LIBREDXX_STATUS_SUCCESS) {
-				return ret;
-			}
-			device->d3xx_stream_pipe = *buffer_size;
-		}
-		OVERLAPPED overlapped = {0};
-		overlapped.hEvent = CreateEventW(NULL, true, false, NULL);
-		if (!DeviceIoControl(device->handle, 0x0022220A, &read_pipe, sizeof(read_pipe), (DWORD*)buffer, (DWORD)*buffer_size, NULL, &overlapped)) {
-			if (GetLastError() != ERROR_IO_PENDING) {
-				ret = LIBREDXX_STATUS_ERROR_SYS;
-			} else {
-				device->read_interrupted = false;
-				DWORD transferred = 0;
-				if (!GetOverlappedResult(device->handle, &overlapped, &transferred, true)) {
-					ret = (GetLastError() == ERROR_OPERATION_ABORTED && device->read_interrupted) ? LIBREDXX_STATUS_ERROR_INTERRUPTED : LIBREDXX_STATUS_ERROR_SYS;
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			libredxx_status ret = LIBREDXX_STATUS_SUCCESS;
+			uint8_t read_pipe = 0x82;
+			if (device->d3xx_stream_pipe != *buffer_size) {
+				ret = libredxx_d3xx_set_stream_pipe(device, read_pipe, *buffer_size);
+				if (ret != LIBREDXX_STATUS_SUCCESS) {
+					return ret;
 				}
-				*buffer_size = transferred;
+				device->d3xx_stream_pipe = *buffer_size;
 			}
+			OVERLAPPED overlapped = {0};
+			overlapped.hEvent = CreateEventW(NULL, true, false, NULL);
+			if (!DeviceIoControl(device->handle, 0x0022220A, &read_pipe, sizeof(read_pipe), (DWORD*)buffer, (DWORD)*buffer_size, NULL, &overlapped)) {
+				if (GetLastError() != ERROR_IO_PENDING) {
+					ret = LIBREDXX_STATUS_ERROR_SYS;
+				} else {
+					device->read_interrupted = false;
+					DWORD transferred = 0;
+					if (!GetOverlappedResult(device->handle, &overlapped, &transferred, true)) {
+						ret = (GetLastError() == ERROR_OPERATION_ABORTED && device->read_interrupted) ? LIBREDXX_STATUS_ERROR_INTERRUPTED : LIBREDXX_STATUS_ERROR_SYS;
+					}
+					*buffer_size = transferred;
+				}
+			}
+			CloseHandle(overlapped.hEvent);
+			device->d2xx_read_event = NULL;
+			return ret;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		CloseHandle(overlapped.hEvent);
-		device->d2xx_read_event = NULL;
-		return ret;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
-		if (endpoint == LIBREDXX_ENDPOINT_FEATURE) {
+		if (endpoint == LIBREDXX_ENDPOINT_CONTROL) {
 			const BYTE report_id = bBuffer[0];
 			if (!report_id || *buffer_size != LIBREDXX_FT260_REPORT_SIZE) {
 				return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
@@ -489,32 +495,40 @@ libredxx_status libredxx_write(libredxx_opened_device* device, void* buffer, siz
 {
 	BYTE* bBuffer = (BYTE*)buffer;
 	if (device->found.type == LIBREDXX_DEVICE_TYPE_D2XX) {
-		if (!WriteFile(device->handle, buffer, (DWORD)*buffer_size, (DWORD*)buffer_size, NULL)) {
-			return LIBREDXX_STATUS_ERROR_SYS;
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			if (!WriteFile(device->handle, buffer, (DWORD)*buffer_size, (DWORD*)buffer_size, NULL)) {
+				return LIBREDXX_STATUS_ERROR_SYS;
+			}
+			return LIBREDXX_STATUS_SUCCESS;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		return LIBREDXX_STATUS_SUCCESS;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_D3XX) {
-		libredxx_status ret = LIBREDXX_STATUS_SUCCESS;
-		OVERLAPPED overlapped = {0};
-		overlapped.hEvent = CreateEventW(NULL, true, false, NULL);
-		uint8_t write_pipe = 0x02;
-		if (!DeviceIoControl(device->handle, 0x0022220D, &write_pipe, sizeof(write_pipe), (DWORD*)buffer, (DWORD)*buffer_size, NULL, &overlapped)) {
-			if (GetLastError() != ERROR_IO_PENDING) {
-				ret = LIBREDXX_STATUS_ERROR_SYS;
-			} else {
-				if (!GetOverlappedResult(device->handle, &overlapped, (DWORD*)buffer_size, true)) {
+		if (endpoint == LIBREDXX_ENDPOINT_IO) {
+			libredxx_status ret = LIBREDXX_STATUS_SUCCESS;
+			OVERLAPPED overlapped = {0};
+			overlapped.hEvent = CreateEventW(NULL, true, false, NULL);
+			uint8_t write_pipe = 0x02;
+			if (!DeviceIoControl(device->handle, 0x0022220D, &write_pipe, sizeof(write_pipe), (DWORD*)buffer, (DWORD)*buffer_size, NULL, &overlapped)) {
+				if (GetLastError() != ERROR_IO_PENDING) {
 					ret = LIBREDXX_STATUS_ERROR_SYS;
+				} else {
+					if (!GetOverlappedResult(device->handle, &overlapped, (DWORD*)buffer_size, true)) {
+						ret = LIBREDXX_STATUS_ERROR_SYS;
+					}
 				}
 			}
+			CloseHandle(overlapped.hEvent);
+			return ret;
+		} else {
+			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		CloseHandle(overlapped.hEvent);
-		return ret;
 	} else if (device->found.type == LIBREDXX_DEVICE_TYPE_FT260) {
 		const BYTE report_id = bBuffer[0];
 		if (!report_id) {
 			return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 		}
-		if (endpoint == LIBREDXX_ENDPOINT_FEATURE) {
+		if (endpoint == LIBREDXX_ENDPOINT_CONTROL) {
 			if (*buffer_size != LIBREDXX_FT260_REPORT_SIZE) {
 				return LIBREDXX_STATUS_ERROR_INVALID_ARGUMENT;
 			}
