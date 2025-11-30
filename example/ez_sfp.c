@@ -127,7 +127,7 @@ int main() {
 	rep_set_gpio_fn.report_id = 0xA1;
 	rep_set_gpio_fn.request = 0x09;
 	rep_set_gpio_fn.function = 0;
-	status = libredxx_write(device, &rep_set_gpio_fn, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_write(device, &rep_set_gpio_fn, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
@@ -137,14 +137,14 @@ int main() {
 	size = sizeof(rep_set_gpio);
 	rep_set_gpio.report_id = 0xB0;
 	rep_set_gpio.gpio_dir_ex = 1 << 6;
-	status = libredxx_write(device, &rep_set_gpio, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_write(device, &rep_set_gpio, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
 
 	// set GPIO value
 	rep_set_gpio.gpio_val_ex = 1 << 6;
-	status = libredxx_write(device, &rep_set_gpio, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_write(device, &rep_set_gpio, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
@@ -157,7 +157,7 @@ int main() {
 	size = sizeof(rep_i2c_reset);
 	rep_i2c_reset.report_id = 0xA1;
 	rep_i2c_reset.request = 0x20;
-	status = libredxx_write(device, &rep_i2c_reset, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_write(device, &rep_i2c_reset, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
@@ -169,7 +169,7 @@ int main() {
 	rep_set_i2c_speed.request = 0x22;
 	rep_set_i2c_speed.speed_lsb = 0x64; // 100kbps
 	rep_set_i2c_speed.speed_msb = 0;
-	status = libredxx_write(device, &rep_set_i2c_speed, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_write(device, &rep_set_i2c_speed, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
@@ -178,7 +178,7 @@ int main() {
 	struct libredxx_ft260_feature_in_gpio rep_get_gpio = {0};
 	size = sizeof(rep_get_gpio);
 	rep_get_gpio.report_id = 0xB0;
-	status = libredxx_read(device, &rep_get_gpio, &size, LIBREDXX_ENDPOINT_FEATURE);
+	status = libredxx_read(device, &rep_get_gpio, &size, LIBREDXX_ENDPOINT_CONTROL);
 	if (status != LIBREDXX_STATUS_SUCCESS) {
 		return -1;
 	}
